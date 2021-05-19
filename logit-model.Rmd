@@ -1,0 +1,159 @@
+---
+title: "Logistic Regression Model for per-school Student Teacher Race Match"
+author: "Julia Tucher"
+date: "5/13/2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+In this code sample, submitted in partial completion of my senior honors thesis at Williams College, I use an original metric for teacher-student race match along with a number of school descriptor variables provided by the California Department of Education (CDE). Race match refers to a student-teacher pairing where student and teacher share a racial-ethnic background. The thesis was motivated by a body of education research indicating the benefits of race match on student outcomes, student self-perception, and teacher expectations. The goal of this aspect of the project is to build a logistic regression model, with proportion of same-race teachers as the response variable, to examine trends in student-teacher race match. Specifically, I am interested to see how race match compares across racial/ethnic groups; the demographic proportions of the school; and a school's charter status, instruction level, and enrollment count.
+
+First, I import relevant libraries and the data set. The data, which I compiled from a number of CDE sources, is per grade level instead of per school. Furthermore, match values represent the average number of same-race teachers a student has, instead of the proportion of their teachers that are a race match ($\text{Match Proportion} = \frac{\text{Match Value}}{\text{Total Teachers}}$). So in this R chunk, after importing, we aggregate at the school level and convert to proportions, as well as getting rid of extraneous predictors.
+```{r, message=FALSE}
+library(tidyverse)
+library(caret)
+library(aod)
+library(car)
+library(Metrics)
+
+# import data (each observation is per school, per grade, per racial-ethnic group)
+grades <- read.csv("data.csv")
+
+# multiply by grade-wise enrollment to get total matches and mismatches at school level
+grades_interaction <- grades %>%
+  mutate(MatchValue = ifelse(EnrollCount != 0, MatchValue * EnrollCount, 0),
+         MismatchValue = ifelse(EnrollCount != 0, MismatchValue * EnrollCount, 0))
+
+# aggregate by summing across grade levels, scaled by enrollment
+schools <- aggregate(formula=cbind(EnrollCount, MatchValue, MismatchValue, TotalTeacher) ~ CDS_CODE +
+                       DistrictCode + SchoolCode + COUNTY + DISTRICT + 
+                       SCHOOL + GradeCategory + SchoolType + EthnicGroup + Elementary, data=grades_interaction, FUN=sum)
+
+# divide by total school enrollment, then calculate enrollment proportion and match proportion at school level
+schools <- schools %>%
+  mutate(MatchValue = ifelse(EnrollCount != 0, MatchValue / EnrollCount, NA),
+         MismatchValue = ifelse(EnrollCount != 0, MismatchValue / EnrollCount, NA),
+         TotalTeacher = MatchValue + MismatchValue) %>%
+  group_by(CDS_CODE) %>%
+  mutate(EnrollTotal = sum(EnrollCount)) %>%
+  ungroup() %>%
+  mutate(EnrollProportionSameRace = EnrollCount / EnrollTotal,
+         MatchProp = MatchValue / TotalTeacher) %>% 
+  select(-c(CDS_CODE, EnrollCount)) %>%
+  na.omit() %>%
+  as.data.frame()
+```
+The resulting dataset `schools` includes observations for each racial-ethnic group at each public school in the state of California, excluding a number of non-traditional public schools. The variables are listed as follows: The first six variables are school identifiers. SchoolType is either traditional public (TPS) or charter. There are 7 racial-ethnic groups in the data set. Elementary is a boolean representing whether or not the school instructs K-5 grade levels. TotalTeacher refers to the average number of teachers students in that observation have in the school year. EnrollTotal is the enrollment total for the school, while EnrollProportionSameRace indicates the proportion of the student body comprised by that racial-ethnic group. Finally, MatchProp is our response variable.
+
+Now that our data is aggregated at the school level, includes a response variable in the form of a proportion, and has the desired predictor variables, set the encoding scheme and view the first few rows of the data set. 
+```{r}
+# set coding scheme for ethnic group variable
+schools$EthnicGroup = as.factor(schools$EthnicGroup)
+contrasts(schools$EthnicGroup) <- contr.sum(levels(schools$EthnicGroup))
+colnames(contrasts(schools$EthnicGroup)) <- head(levels(schools$EthnicGroup), -1)
+
+# peek at data
+head(schools)
+```
+
+Next, set the seed and partition the data into training and testing data, for later model validation.
+```{r}
+set.seed(100)  # for reproducability
+
+training.samples <- schools$MatchProp %>% createDataPartition(p = 0.8, list = FALSE)
+train.data  <- schools[training.samples, ]
+test.data <- schools[-training.samples, ]
+```
+
+Before building the model, we must check the five assumptions of logistic regression:
+
+1. Binary logistic regression requires outcome variable to be binary. Here, Match is a success and Mismatch is a failure. Match proportion is the proportion of trails (total teachers) that are successes.
+
+2. Observations are independent.
+
+3. Little to no multicolinearity among independent variables.
+```{r}
+cor(schools[,c("EnrollProportionSameRace", "TotalTeacher", "EnrollTotal")])
+```
+
+4. Linearity of independent variables and log odds. We isolate the quantitative predictors and plot them against the log odds of our response variable to assess linearity. We note that while same-race enrollment proportion has a weak, positive linear relationship, enrollment total and total teacher have nearly no linear relationship. Thus, we expect only the first predictor to be a statistically relevant predictor.
+```{r, warning=FALSE}
+# Select only numeric predictors
+predictors <- c("EnrollProportionSameRace", "TotalTeacher", "EnrollTotal")
+mydata <- test.data[, predictors]
+
+# Bind the logit and tidying the data for plot
+mydata <- mydata %>%
+  mutate(logit = log(test.data$MatchProp/(1-test.data$MatchProp))) %>%
+  gather(key = "predictors", value = "predictor.value", -logit)
+
+# plot predictors against logit
+ggplot(mydata, aes(logit, predictor.value)) +
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+5. Large sample size: $n = 46321$.
+```{r}
+nrow(train.data)
+```
+
+The last step before analysis is to build the model. Write a formula for the logistic regression model that includes all possible terms, and reduce to the best fit model using stepwise regression (this eliminates terms by comparing models' BIC values).Use the `glm()` function to create a linear model.
+```{r, include=FALSE}
+formula.int <- MatchProp ~ (EnrollProportionSameRace + TotalTeacher + EnrollTotal)  * (Elementary + SchoolType) * EthnicGroup
+model.int <- glm(formula.int, data=train.data, family=binomial(logit), weights = TotalTeacher) %>%
+  step(., trace=0, k=log(nrow(train.data)))
+```
+
+Exponentiating the coefficients (as is typical with logistic regression) helps compare the associated impact of a predictor on the odds of race match. I'll summarize a few of the many takeaways from the model summary that I included in my thesis here. Note that on average, increased enrollment proportion is associated with increase in race match. However, the specific impact of enrollment proportion on match proportion varies across groups. Specifically, the increase in odds of race match associated with a single-percentage point increase in enrollment prop for Filipino and Pacific Islander students are more than 15 times the mean across all groups, for Black students 1.6x the mean, and for American Indian, Asian, and Hispanic students a fraction of the mean impact. However, this model cannot conclude generally about the impact of school type or grade category, as their impact is clearly dependent on other factors. On average, the only racial-ethnic group that expects higher race match in traditional schools is American Indian students, whereas Asian students expect biggest increase in odds of race match in charter schools compared to TPS.
+```{r}
+# view all the exponentiated coefficients
+exp(coefficients(model.int))
+```
+
+To assess model fit, we can view the McFadden's R-squared, which estimates the proportion of total variance in the dataset accounted for by this model. Here, we note a relatively high value of 0.625.
+```{r, warning=FALSE}
+# create null model to compare our model to
+null.model <- glm(MatchProp~1, data=train.data, family=binomial(logit), weights=TotalTeacher)
+
+# McFadden's R2
+mcfadden <- 1 - logLik(model.int)/logLik(null.model)
+mcfadden
+```
+
+To further assess the model, and determine its predictive capabilities, we test it on the holdout data. Then, we examine the model's root mean squared error and Pearson's r-squared for these predictions. The rmse value means that, on average, the true value is within 11.74 percentage points of the predicted percentage. The r-squared coefficient of 0.8 indicates that the model performed well on holdout data.
+```{r, warning=FALSE}
+# Make predictions
+pred.data <- mutate(test.data, Preds = predict(model.int, test.data, type = "response"))
+
+# Model accuracy
+rmse <- rmse(pred.data$MatchProp, pred.data$Preds)
+r2 <- cor(pred.data$MatchProp, pred.data$Preds)^2
+rmse
+r2
+```
+
+Finally, we visualize the model's logistic curve plotted on our dataset. We facet results by racial/ethnic group, plotting race match proportion on enrollment proportion. Color and linetype are used to depict school classification.
+```{r}
+# create points for curve using full range of each predictor's values
+alldata = expand.grid(EnrollProportionSameRace=seq(0,1,0.05), SchoolType=c("TPS", "Charter"),
+                      Elementary=c(TRUE, FALSE), EthnicGroup=levels(train.data$EthnicGroup),
+                      TotalTeacher=mean(schools$TotalTeacher),
+                      EnrollTotal=mean(schools$EnrollTotal)) %>%
+  mutate(Prediction = predict(model.int, newdata=., type="response"))
+
+# plot
+ggplot() +
+  geom_point(data=train.data, aes(EnrollProportionSameRace, MatchProp), alpha = 0.1) +
+  geom_line(data=alldata, aes(x=EnrollProportionSameRace, y=Prediction, color=SchoolType,
+                              linetype=Elementary)) +
+  facet_wrap(facets=vars(EthnicGroup)) + 
+  labs(x="Proportion of Total Enrollment", y = "Proportion of Teachers Race-Match") + 
+  scale_x_continuous(breaks=seq(0, 1, 0.25), labels=seq(0, 1, 0.25)) + 
+  guides(color=guide_legend(title="School Type"), linetype=guide_legend(title="Elementary Status"))
+```
+
+While the plots and model summary are particularly data rich and there are many results to conclude from this model, I summarize a few of the results here. The most significant quantiative predictor for race match proportion is enrollment proportion. School type and grade level matter much less than expected, overall. And the impact of school attributes is very dependent on racial/ethnic group.
