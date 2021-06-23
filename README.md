@@ -5,3 +5,5 @@ This repo contains code in R outlining the process for constructing a logistic r
 The .Rmd file requires the included data file, and the compiled version can be found in the .html file. Note that the data was aggregated from various public data sets hosted by the California Department of Education.
 
 Each observation in the data set represents the teacher-student race match expected for students of a given racial-ethnic group, of a certain grade level, at the given school. That match value is represented as a proportion of teachers that are of the same racial-ethnic background as the student. Each entry also includes additional information about the school, including educational instruction level and charter status. More information is included in the R markdown file.
+
+The final thesis paper is hosted [here](https://unbound.williams.edu/theses/islandora/object/studenttheses%3A1726?search=Julia%2520tucher)
